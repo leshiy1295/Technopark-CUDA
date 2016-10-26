@@ -1,13 +1,3 @@
-/*
-	ДЗ: 
-		- gnuplot;
-		- версия для CPU + сравнение;
-		- задание №2;
-		- неявная схема;
-		- оптимизации по возможности.
-*/
-
-
 #include "cuda_runtime.h"
 #include "device_launch_parameters.h"
 
@@ -27,9 +17,9 @@
 	} while (0);
 
 //#define PRINT
-//#define COMPARE
-//#define EXPLICIT
-#define IMPLICIT
+#define COMPARE
+#define EXPLICIT
+//#define IMPLICIT
 
 #ifdef IMPLICIT
 #define EPS 1.e-3
@@ -37,15 +27,20 @@
 
 #define BLOCK_SIZE 32
 
-#define L 10
+#define L 1000
 
-#define xPoints (10 + 1)
-#define tPoints (5 + 1)
+#define xPoints (200 + 1)
+#define tPoints (10000 + 1)
 
 #define DT 5
 #define DX L * 1.0 / (xPoints - 1)
 
+#ifdef EXPLICIT
+__global__ void computeTemp(double *temp, const int k)
+#endif
+#ifdef IMPLICIT
 __global__ void computeTemp(double *temp, const int k, double *delta)
+#endif
 {
 	int threadId = threadIdx.x + blockDim.x * blockIdx.x;
 #ifdef EXPLICIT
@@ -73,7 +68,7 @@ __global__ void computeTemp(double *temp, const int k, double *delta)
 				DT / (DX * DX) * temp[(k - 1) * xPoints + threadId - 1] +
 				DT / (DX * DX) * temp[(k - 1) * xPoints + threadId + 1]
 				) / (2 * DT / (DX * DX) + 1);
-			delta[threadId] = temp[k * xPoints + threadId] - delta[threadId];
+			delta[threadId] = abs(temp[k * xPoints + threadId] - delta[threadId]);
 		}
 	}
 #endif
@@ -101,8 +96,9 @@ int main()
 	CUDA_CALL(cudaMalloc(&devTemp, memSize));
 
 #ifdef IMPLICIT
-	double *devBuffer;
-	CUDA_CALL(cudaMalloc(&devBuffer, xPoints * sizeof(double)));
+	double *delta = (double *)calloc(xPoints, sizeof(double));
+	double *devDelta;
+	CUDA_CALL(cudaMalloc(&devDelta, xPoints * sizeof(double)));
 #endif
 
 #ifdef COMPARE
@@ -127,13 +123,22 @@ int main()
 
 	for (int k = 1; k < tPoints; ++k) {
 #ifdef IMPLICIT
-		CUDA_CALL(cudaMemset(&devBuffer, 0, xPoints * sizeof(double)));
-		computeTemp << <blocksCount, BLOCK_SIZE >> >(devTemp, k, devBuffer);
+		bool flag = false; // флаг сходимости решения СЛАУ
+		while (!flag) {
+			computeTemp << <blocksCount, BLOCK_SIZE >> > (devTemp, k, devDelta);
+			CUDA_CALL(cudaMemcpy(delta, devDelta, xPoints * sizeof(double), cudaMemcpyDeviceToHost));
+			double sum = 0;
+			for (int i = 0; i < xPoints; ++i) {
+				sum += delta[i];
+			}
+			if (sum < EPS) {
+				flag = true;
+			}
+		}
 #endif
 #ifdef EXPLICIT
 		computeTemp << <blocksCount, BLOCK_SIZE >> >(devTemp, k);
 #endif
-		CUDA_CALL(cudaDeviceSynchronize());
 	}
 
 	CUDA_CALL(cudaGetLastError());
@@ -170,9 +175,10 @@ int main()
 	CUDA_CALL(cudaEventDestroy(GPUStopWithMem));
 
 	CPUStart = clock();
-
+	memset(temp, 0, memSize);
 #ifdef EXPLICIT
 	for (int k = 1; k < tPoints; ++k) {
+		temp[k*xPoints + xPoints - 1] = temp[(k - 1) * xPoints + xPoints - 1] + DT;
 		for (int j = 0; j < xPoints - 1; ++j) {
 				temp[k*xPoints + j] = (
 					temp[(k - 1) * xPoints + j + 1] -
@@ -180,12 +186,30 @@ int main()
 					temp[(k - 1) * xPoints + j - 1]
 					) * DT / (DX * DX) + temp[(k - 1) * xPoints + j];
 		}
-		temp[k*xPoints + xPoints - 1] = temp[(k - 1) * xPoints + xPoints - 1] + DT;
 	}
 #endif
 #ifdef IMPLICIT
 	for (int k = 1; k < tPoints; ++k) {
-
+		bool flag = false; // флаг сходимости решения СЛАУ
+		while (!flag) {
+			temp[k*xPoints + xPoints - 1] = temp[(k - 1) * xPoints + xPoints - 1] + DT;
+			for (int j = 1; j < xPoints - 1; ++j) {
+				delta[j] = temp[k * xPoints + j];
+				temp[k * xPoints + j] = (
+					temp[(k - 1) * xPoints + j] +
+					DT / (DX * DX) * temp[(k - 1) * xPoints + j- 1] +
+					DT / (DX * DX) * temp[(k - 1) * xPoints + j + 1]
+					) / (2 * DT / (DX * DX) + 1);
+				delta[j] = abs(temp[k * xPoints + j] - delta[j]);
+			}
+			double sum = 0;
+			for (int i = 0; i < xPoints; ++i) {
+				sum += delta[i];
+			}
+			if (sum < EPS) {
+				flag = true;
+			}
+		}		
 	}
 #endif
 
