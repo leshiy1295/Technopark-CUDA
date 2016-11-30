@@ -1,9 +1,9 @@
 /*
-	Моделирование воздействия на прямоугольную мембрану
-	COMPARE - режим сравнения реализации на GPU и на CPU
-	PRINT - режим вывода значений координат мембраны
-	EXPLICIT - явный метод получения результата
-	IMPLICIT - неявный метод получения результата
+Моделирование воздействия на прямоугольную мембрану
+COMPARE - режим сравнения реализации на GPU и на CPU
+PRINT - режим вывода значений координат мембраны
+EXPLICIT - явный метод получения результата
+IMPLICIT - неявный метод получения результата
 */
 
 #include "cuda_runtime.h"
@@ -24,10 +24,10 @@
 		} \
 	} while (0);
 
-#define PRINT
-//#define COMPARE
-//#define EXPLICIT
-#define IMPLICIT
+//#define PRINT
+#define COMPARE
+#define EXPLICIT
+//#define IMPLICIT
 
 #ifdef IMPLICIT
 #define EPS 1.e-3
@@ -36,18 +36,18 @@
 #define BLOCK_SIZE 32
 
 #define a 5.0
-#define F(x, y, t) 10.0
 
-#define X 500
-#define Y 500
+#define X 500.0
+#define Y 500.0
+#define F(x, y, k) (k > 2 ? 0 : 1e-6 * ((x - X / 2) * (x - X / 2) + (y - Y / 2) * (y - Y / 2)))
 
 #define xPoints (50 + 1)
 #define yPoints (50 + 1)
 #define tPoints (5000 + 1)
 
-#define DT 1
-#define DX X * 1.0 / (xPoints - 1)
-#define DY Y * 1.0 / (yPoints - 1)
+#define DT 1.0
+#define DX (X * 1.0 / (xPoints - 1))
+#define DY (Y * 1.0 / (yPoints - 1))
 
 #ifdef EXPLICIT
 __global__ void computeZ(double *z, const int k)
@@ -73,13 +73,13 @@ __global__ void computeZ(double *z, const int k, double *delta)
 		z[k * xPoints * yPoints + x * yPoints + y] = DT * DT * (
 			F(x, y, k) + a * a * (
 				(
-					  z[(k - 1) * xPoints * yPoints + (x + 1) * yPoints + y]
+					z[(k - 1) * xPoints * yPoints + (x + 1) * yPoints + y]
 					- 2 * z[(k - 1) * xPoints * yPoints + x * yPoints + y]
 					+ z[(k - 1) * xPoints * yPoints + (x - 1) * yPoints + y]
 				) / (DX * DX)
 				+
 				(
-					  z[(k - 1) * xPoints * yPoints + x * yPoints + y + 1]
+					z[(k - 1) * xPoints * yPoints + x * yPoints + y + 1]
 					- 2 * z[(k - 1) * xPoints * yPoints + x * yPoints + y]
 					+ z[(k - 1) * xPoints * yPoints + x * yPoints + y - 1]
 				) / (DY * DY)
@@ -92,19 +92,19 @@ __global__ void computeZ(double *z, const int k, double *delta)
 		delta[threadId] = z[k * xPoints * yPoints + threadId];
 		z[k * xPoints * yPoints + threadId] = (
 			(
-				  2 * z[(k - 1) * xPoints * yPoints + threadId]
+				2 * z[(k - 1) * xPoints * yPoints + threadId]
 				- z[(k - 2) * xPoints * yPoints + threadId]
 			) / (DT * DT)
 			+ F(x, y, k)
 			+ a * a / (DX * DX) * (
-				  z[(k - 1) * xPoints * yPoints + (x + 1) * yPoints + y]
-				+ z[(k - 1) * xPoints * yPoints + (x - 1) * yPoints + y]
+				z[k * xPoints * yPoints + (x + 1) * yPoints + y]
+				+ z[k * xPoints * yPoints + (x - 1) * yPoints + y]
 			)
 			+ a * a / (DY * DY) * (
-				  z[(k - 1) * xPoints * yPoints + x * yPoints + y + 1]
-				+ z[(k - 1) * xPoints * yPoints + x * yPoints + y - 1]
+				z[k * xPoints * yPoints + x * yPoints + y + 1]
+				+ z[k * xPoints * yPoints + x * yPoints + y - 1]
 			)
-		) / (1 / (DT * DT) + 2 * a * a / (DX * DX) + 2 * a * a / (DY * DY));	
+		) / (1.0 / (DT * DT) + 2 * a * a / (DX * DX) + 2 * a * a / (DY * DY));
 		delta[threadId] = abs(z[k * xPoints * yPoints + threadId] - delta[threadId]);
 #endif
 	}
@@ -114,11 +114,17 @@ int main()
 {
 #ifdef COMPARE
 	cudaEvent_t GPUStartWithMem, GPUStartKernelOnly, GPUStopWithMem, GPUStopKernelOnly;
-	float CPUStart, CPUStop;
+	float CPUStart, CPUStop, CPUOneCycleStart, CPUOneCycleStop;
 
 	float GPUTimeWithMem = 0.0f;
 	float GPUTimeKernelOnly = 0.0f;
 	float CPUTime = 0.0f;
+#ifdef IMPLICIT
+	cudaEvent_t GPUStartOneCycle, GPUStopOneCycle;
+	float CPUOneCycleAVGTime = 0.0f;
+	float GPUTimeOneCycle = 0.0f;
+	float GPUTimeOneCycleAvg = 0.0f;
+#endif
 #endif
 
 	int totalElemCount = xPoints * yPoints * (tPoints + 1); // нужны k - 2. Введём искусственно матрицу для -1
@@ -132,9 +138,12 @@ int main()
 	CUDA_CALL(cudaMalloc(&devZ, memSize));
 
 #ifdef IMPLICIT
+	int count = 0;
 	double *delta = (double *)calloc(xPoints * yPoints, sizeof(double));
 	double *devDelta;
 	CUDA_CALL(cudaMalloc(&devDelta, xPoints * yPoints * sizeof(double)));
+	CUDA_CALL(cudaEventCreate(&GPUStartOneCycle));
+	CUDA_CALL(cudaEventCreate(&GPUStopOneCycle));
 #endif
 
 #ifdef COMPARE
@@ -161,8 +170,14 @@ int main()
 #ifdef IMPLICIT
 		bool flag = false; // флаг сходимости решения СЛАУ
 		while (!flag) {
+			CUDA_CALL(cudaEventRecord(GPUStartOneCycle, 0));
 			computeZ << <blocksCount, BLOCK_SIZE >> > (devZ, k, devDelta);
-			CUDA_CALL(cudaMemcpy(delta, devDelta, xPoints * sizeof(double), cudaMemcpyDeviceToHost));
+			CUDA_CALL(cudaEventRecord(GPUStopOneCycle, 0));
+			CUDA_CALL(cudaEventSynchronize(GPUStopOneCycle));
+			CUDA_CALL(cudaEventElapsedTime(&GPUTimeOneCycle, GPUStartOneCycle, GPUStopOneCycle));
+			GPUTimeOneCycleAvg += GPUTimeOneCycle;
+			count += 1;
+			CUDA_CALL(cudaMemcpy(delta, devDelta, xPoints * yPoints * sizeof(double), cudaMemcpyDeviceToHost));
 			double sum = 0;
 			for (int i = 0; i < xPoints; ++i) {
 				for (int j = 0; j < yPoints; ++j) {
@@ -208,11 +223,19 @@ int main()
 	CUDA_CALL(cudaEventElapsedTime(&GPUTimeKernelOnly, GPUStartKernelOnly, GPUStopKernelOnly));
 	printf("GPU Time With Mem: %.3f ms\n", GPUTimeWithMem);
 	printf("GPU Time Kernel Only: %.3f ms\n", GPUTimeKernelOnly);
-
+	
 	CUDA_CALL(cudaEventDestroy(GPUStartKernelOnly));
 	CUDA_CALL(cudaEventDestroy(GPUStopKernelOnly));
 	CUDA_CALL(cudaEventDestroy(GPUStartWithMem));
 	CUDA_CALL(cudaEventDestroy(GPUStopWithMem));
+
+#ifdef IMPLICIT
+	GPUTimeOneCycleAvg /= count;
+	printf("GPU Time One Cycle: %.3f ms\n", GPUTimeOneCycle);
+	CUDA_CALL(cudaEventDestroy(GPUStartOneCycle));
+	CUDA_CALL(cudaEventDestroy(GPUStopOneCycle));
+	count = 0;
+#endif
 
 	CPUStart = clock();
 	memset(z, 0, memSize);
@@ -242,22 +265,43 @@ int main()
 	}
 #endif
 #ifdef IMPLICIT
-	for (int k = 1; k < tPoints; ++k) {
+	for (int k = 2; k < tPoints + 1; ++k) {
 		bool flag = false; // флаг сходимости решения СЛАУ
 		while (!flag) {
-			temp[k*xPoints + xPoints - 1] = temp[(k - 1) * xPoints + xPoints - 1] + DT;
-			for (int j = 1; j < xPoints - 1; ++j) {
-				delta[j] = temp[k * xPoints + j];
-				temp[k * xPoints + j] = (
-					temp[(k - 1) * xPoints + j] +
-					DT / (DX * DX) * temp[(k - 1) * xPoints + j - 1] +
-					DT / (DX * DX) * temp[(k - 1) * xPoints + j + 1]
-					) / (2 * DT / (DX * DX) + 1);
-				delta[j] = abs(temp[k * xPoints + j] - delta[j]);
+#ifdef IMPLICIT
+			CPUOneCycleStart = clock();
+#endif
+			for (int x = 1; x < xPoints - 1; ++x) {
+				for (int y = 1; y < yPoints - 1; ++y) {
+					delta[x * yPoints + y] = z[k * xPoints * yPoints + x * yPoints + y];
+					z[k * xPoints * yPoints + x * yPoints + y] = (
+						(
+							2 * z[(k - 1) * xPoints * yPoints + x * yPoints + y]
+							- z[(k - 2) * xPoints * yPoints + x * yPoints + y]
+							) / (DT * DT)
+						+ F(x, y, k)
+						+ a * a / (DX * DX) * (
+							z[k * xPoints * yPoints + (x + 1) * yPoints + y]
+							+ z[k * xPoints * yPoints + (x - 1) * yPoints + y]
+							)
+						+ a * a / (DY * DY) * (
+							z[k * xPoints * yPoints + x * yPoints + y + 1]
+							+ z[k * xPoints * yPoints + x * yPoints + y - 1]
+							)
+						) / (1.0 / (DT * DT) + 2 * a * a / (DX * DX) + 2 * a * a / (DY * DY));
+					delta[x * yPoints + y] = abs(z[k * xPoints * yPoints + x * yPoints + y] - delta[x * yPoints + y]);
+				}
 			}
+#ifdef IMPLICIT
+			CPUOneCycleStop = clock();
+			CPUOneCycleAVGTime += 1000. * (CPUOneCycleStop - CPUOneCycleStart) / CLOCKS_PER_SEC;
+			count += 1;
+#endif
 			double sum = 0;
 			for (int i = 0; i < xPoints; ++i) {
-				sum += delta[i];
+				for (int j = 0; j < yPoints; ++j) {
+					sum += delta[i * yPoints + j];
+				}
 			}
 			if (sum < EPS) {
 				flag = true;
@@ -269,6 +313,11 @@ int main()
 	CPUStop = clock();
 	CPUTime = 1000. * (CPUStop - CPUStart) / CLOCKS_PER_SEC;
 	printf("CPU time: %.3f ms\n", CPUTime);
+
+#ifdef IMPLICIT
+	CPUTime = CPUOneCycleAVGTime / count;
+	printf("CPU one cycle time: %.3f ms\n", CPUTime);
+#endif
 
 #endif // COMPARE
 
